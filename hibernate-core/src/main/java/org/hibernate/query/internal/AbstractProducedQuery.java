@@ -44,6 +44,7 @@ import org.hibernate.LockMode;
 import org.hibernate.LockOptions;
 import org.hibernate.NonUniqueResultException;
 import org.hibernate.PropertyNotFoundException;
+import org.hibernate.QueryParameterException;
 import org.hibernate.ScrollMode;
 import org.hibernate.TypeMismatchException;
 import org.hibernate.engine.query.spi.EntityGraphQueryHint;
@@ -125,6 +126,8 @@ public abstract class AbstractProducedQuery<R> implements QueryImplementor<R> {
 	private Object optionalObject;
 	private Serializable optionalId;
 	private String optionalEntityName;
+
+	private Boolean passDistinctThrough;
 
 	public AbstractProducedQuery(
 			SharedSessionContractImplementor producer,
@@ -617,13 +620,13 @@ public abstract class AbstractProducedQuery<R> implements QueryImplementor<R> {
 
 	@Override
 	public Set<Parameter<?>> getParameters() {
-		return parameterMetadata.collectAllParametersJpa();
+		return getParameterMetadata().collectAllParametersJpa();
 	}
 
 	@Override
 	public Parameter<?> getParameter(String name) {
 		try {
-			return parameterMetadata.getQueryParameter( name );
+			return getParameterMetadata().getQueryParameter( name );
 		}
 		catch ( HibernateException e ) {
 			throw getExceptionConverter().convert( e );
@@ -634,7 +637,7 @@ public abstract class AbstractProducedQuery<R> implements QueryImplementor<R> {
 	@SuppressWarnings("unchecked")
 	public <T> Parameter<T> getParameter(String name, Class<T> type) {
 		try {
-			final QueryParameter parameter = parameterMetadata.getQueryParameter( name );
+			final QueryParameter parameter = getParameterMetadata().getQueryParameter( name );
 			if ( !parameter.getParameterType().isAssignableFrom( type ) ) {
 				throw new IllegalArgumentException(
 						"The type [" + parameter.getParameterType().getName() +
@@ -657,20 +660,25 @@ public abstract class AbstractProducedQuery<R> implements QueryImplementor<R> {
 		//			deprecated since 5.x.  These are numbered starting from 0 and kept in the
 		//			ParameterMetadata positional-parameter array keyed by this zero-based position
 		//		2) JPA's definition is really just a named parameter, but expected to explicitly be
-		//			sequential intergers starting from 0 (ZERO); they can repeat.
+		//			sequential integers starting from 1 (ONE); they can repeat.
 		//
 		// It is considered illegal to mix positional-parameter with named parameters of any kind.  So therefore.
 		// if ParameterMetadata reports that it has any positional-parameters it is talking about the
 		// legacy Hibernate concept.
 		// lookup jpa-based positional parameters first by name.
 		try {
-			if ( parameterMetadata.getPositionalParameterCount() == 0 ) {
-				return parameterMetadata.getQueryParameter( Integer.toString( position ) );
+			if ( getParameterMetadata().getPositionalParameterCount() == 0 ) {
+				try {
+					return getParameterMetadata().getQueryParameter( Integer.toString( position ) );
+				}
+				catch (HibernateException e) {
+					throw new QueryParameterException( "could not locate parameter at position [" + position + "]" );
+				}
 			}
-			// fallback to oridinal lookup
-			return parameterMetadata.getQueryParameter( position );
+			// fallback to ordinal lookup
+			return getParameterMetadata().getQueryParameter( position );
 		}
-		catch ( HibernateException e ) {
+		catch (HibernateException e) {
 			throw getExceptionConverter().convert( e );
 		}
 	}
@@ -679,7 +687,7 @@ public abstract class AbstractProducedQuery<R> implements QueryImplementor<R> {
 	@SuppressWarnings("unchecked")
 	public <T> Parameter<T> getParameter(int position, Class<T> type) {
 		try {
-			final QueryParameter parameter = parameterMetadata.getQueryParameter( position );
+			final QueryParameter parameter = getParameterMetadata().getQueryParameter( position );
 			if ( !parameter.getParameterType().isAssignableFrom( type ) ) {
 				throw new IllegalArgumentException(
 						"The type [" + parameter.getParameterType().getName() +
@@ -750,7 +758,7 @@ public abstract class AbstractProducedQuery<R> implements QueryImplementor<R> {
 	protected Type determineType(String namedParam, Class retType) {
 		Type type = queryParameterBindings.getBinding( namedParam ).getBindType();
 		if ( type == null ) {
-			type = parameterMetadata.getQueryParameter( namedParam ).getType();
+			type = getParameterMetadata().getQueryParameter( namedParam ).getType();
 		}
 		if ( type == null ) {
 			type = getProducer().getFactory().resolveParameterBindType( retType );
@@ -993,6 +1001,9 @@ public abstract class AbstractProducedQuery<R> implements QueryImplementor<R> {
 			else if ( HINT_FOLLOW_ON_LOCKING.equals( hintName ) ) {
 				applied = applyFollowOnLockingHint( ConfigurationHelper.getBoolean( value ) );
 			}
+			else if ( QueryHints.HINT_PASS_DISTINCT_THROUGH.equals( hintName ) ) {
+				applied = applyPassDistinctThrough( ConfigurationHelper.getBoolean( value ) );
+			}
 			else {
 				log.ignoringUnrecognizedQueryHint( hintName );
 			}
@@ -1188,6 +1199,16 @@ public abstract class AbstractProducedQuery<R> implements QueryImplementor<R> {
 	}
 
 	/**
+	 * Apply the follow-on-locking hint.
+	 *
+	 * @param passDistinctThrough the query passes {@code distinct} to the database
+	 */
+	protected boolean applyPassDistinctThrough(boolean passDistinctThrough) {
+		this.passDistinctThrough = passDistinctThrough;
+		return true;
+	}
+
+	/**
 	 * Is the query represented here a native (SQL) query?
 	 *
 	 * @return {@code true} if it is a native query; {@code false} otherwise
@@ -1258,6 +1279,9 @@ public abstract class AbstractProducedQuery<R> implements QueryImplementor<R> {
 				resultTransformer
 		);
 		queryParameters.setQueryPlan( entityGraphHintedQueryPlan );
+		if ( passDistinctThrough != null ) {
+			queryParameters.setPassDistinctThrough( passDistinctThrough );
+		}
 		return queryParameters;
 	}
 
